@@ -40,31 +40,65 @@ void LaunchTrack(shared_ptr<T> tracker, int Mode, const string& path){
     string display_name = "Track";
 
     if (Mode == 0 || Mode == 1) {
-        cv::Mat frame;
-        cap.open(path);
-        cap >> frame;
-        cv::imshow(display_name, frame);
-        cv::putText(frame, "Select target ROI and press ENTER", cv::Point2i(20, 30),
-                    cv::FONT_HERSHEY_COMPLEX_SMALL, 1, cv::Scalar(255,0,0), 1);
-        cv::Rect init_bbox = cv::selectROI(display_name, frame);
-        tracker->init(frame, init_bbox);
-        cv::Rect bbox;
         cv::Mat img;
+        cap.open(path);
+        if (!cap.isOpened()) {
+            cout << "----------Failed to open video/camera!!!----------" << endl;
+            return;
+        }
+
+        bool is_tracking = false;
+        cv::Rect bbox;
+
         while (true) {
             bool ret = cap.read(img);
             if (!ret) {
-                cout << "----------Read failed!!!----------" << endl;
-                return;
+                cout << "----------End of video or read failed!!!----------" << endl;
+                break;
             }
-            auto start = std::chrono::steady_clock::now();
-            bbox = tracker->track(img);
-            auto end = std::chrono::steady_clock::now();
-            std::chrono::duration<double> elapsed = end - start;
-            double time = 1000 * elapsed.count();
-            printf("all infer time: %f ms\n", time);
-            cv::rectangle(img, bbox, cv::Scalar(0,255,0), 2);
-            cv::imshow(display_name, img);
-            cv::waitKey(1);
+
+            if (is_tracking) {
+                auto start = std::chrono::steady_clock::now();
+                bbox = tracker->track(img);
+                auto end = std::chrono::steady_clock::now();
+                std::chrono::duration<double> elapsed = end - start;
+                double time = 1000 * elapsed.count();
+                printf("all infer time: %f ms\n", time);
+                cv::rectangle(img, bbox, cv::Scalar(0, 255, 0), 2);
+            }
+
+            cv::Mat disp_img = img;
+            bool need_resize = (img.cols > 1280 || img.rows > 720);
+            if (need_resize) {
+                cv::resize(img, disp_img, cv::Size(1280, 720));
+            }
+            cv::imshow(display_name, disp_img);
+
+            int delay = is_tracking ? 1 : 30;
+            int key = cv::waitKey(delay);
+            if (key == 'r' || key == 'R') {
+                cv::Mat select_img = disp_img.clone();
+                cv::putText(select_img, "Select target ROI and press ENTER", cv::Point2i(20, 30),
+                            cv::FONT_HERSHEY_COMPLEX_SMALL, 1, cv::Scalar(0, 0, 255), 1);
+                cv::Rect init_bbox = cv::selectROI(display_name, select_img, false);
+                if (init_bbox.width > 0 && init_bbox.height > 0) {
+                    if (need_resize) {
+                        float scale_x = (float)img.cols / 1280.0f;
+                        float scale_y = (float)img.rows / 720.0f;
+                        cv::Rect mapped_bbox;
+                        mapped_bbox.x = std::round(init_bbox.x * scale_x);
+                        mapped_bbox.y = std::round(init_bbox.y * scale_y);
+                        mapped_bbox.width = std::round(init_bbox.width * scale_x);
+                        mapped_bbox.height = std::round(init_bbox.height * scale_y);
+                        tracker->init(img, mapped_bbox);
+                    } else {
+                        tracker->init(img, init_bbox);
+                    }
+                    is_tracking = true;
+                }
+            } else if (key == 27) { // ESC
+                break;
+            }
         }
     }
     else if (Mode == 2) {
@@ -72,9 +106,15 @@ void LaunchTrack(shared_ptr<T> tracker, int Mode, const string& path){
         boost::format fmt(path.data());  //数据集图片
         cv::Mat frame;
         frame = cv::imread((fmt % 1).str(),1);
-        cv::imshow(display_name, frame);
         cv::Rect init_bbox = read_gt(gt_path);
         tracker->init(frame, init_bbox);
+
+        cv::Mat disp_frame = frame;
+        if (frame.cols > 1280 || frame.rows > 720) {
+            cv::resize(frame, disp_frame, cv::Size(1280, 720));
+        }
+        cv::imshow(display_name, disp_frame);
+
         cv::Rect bbox;
         cv::Mat img;
         for (int i = 1; i < 597; ++i) {
@@ -86,7 +126,12 @@ void LaunchTrack(shared_ptr<T> tracker, int Mode, const string& path){
             double time = 1000 * elapsed.count();
             printf("all infer time: %f ms\n", time);
             cv::rectangle(img, bbox, cv::Scalar(0,255,0), 2);
-            cv::imshow(display_name, img);
+
+            cv::Mat disp_img = img;
+            if (img.cols > 1280 || img.rows > 720) {
+                cv::resize(img, disp_img, cv::Size(1280, 720));
+            }
+            cv::imshow(display_name, disp_img);
             cv::waitKey(1);
         }
         return;
@@ -99,26 +144,47 @@ void LaunchTrack(shared_ptr<T> tracker, int Mode, const string& path){
 
 
 int main(int argc, char* argv[]){
-    if (argc != 3){
-        fprintf(stderr, "usage: %s [mode] [path]. \n For video, mode=0, path=/xxx/xxx/*.mp4; \n For webcam mode=1, path is cam id; \n For image dataset, mode=2, path=Woman/img/%04d.jpg; \n", argv[0]);
+    if (argc < 3){
+        fprintf(stderr, "usage: %s [mode] [path] [tracker_type (optional, default: lighttrack)]. \n"
+                        " For video, mode=0, path=/xxx/xxx/*.mp4; \n"
+                        " For webcam mode=1, path is cam id; \n"
+                        " For image dataset, mode=2, path=Woman/img/%%04d.jpg; \n"
+                        " tracker_type: 'lighttrack' (or 'light'), 'ostrack' (or 'os') \n", argv[0]);
         return -1;
     }
     // Mode=0: 视频文件   Mode=1: 摄像头   Mode=2: 数据集
     int Mode = atoi(argv[1]);
     string path = argv[2];
 
-    string z_path = "lighttrack-z.trt";
-    string x_path = "lighttrack-x-head.trt";
-    string engine_path = "ostrack-256.trt";
-
-    auto tracker = LightTrack::create_tracker(z_path, x_path);
-//    auto tracker = OSTrack::create_tracker(engine_path);
-    if(tracker == nullptr){
-        printf("tracker is nullptr.\n");
-        return -1;
+    string tracker_type = "lighttrack";
+    if (argc >= 4) {
+        tracker_type = argv[3];
+        for (auto &c : tracker_type) c = tolower(c);
     }
 
-    LaunchTrack(tracker, Mode, path);
+    if (tracker_type == "lighttrack" || tracker_type == "light") {
+        string z_path = "lighttrack-z.trt";
+        string x_path = "lighttrack-x-head.trt";
+        auto tracker = LightTrack::create_tracker(z_path, x_path);
+        if (tracker == nullptr) {
+            printf("LightTrack tracker creation failed.\n");
+            return -1;
+        }
+        printf("Using LightTrack algorithm...\n");
+        LaunchTrack(tracker, Mode, path);
+    } else if (tracker_type == "ostrack" || tracker_type == "os") {
+        string engine_path = "ostrack-256.trt";
+        auto tracker = OSTrack::create_tracker(engine_path);
+        if (tracker == nullptr) {
+            printf("OSTrack tracker creation failed.\n");
+            return -1;
+        }
+        printf("Using OSTrack algorithm...\n");
+        LaunchTrack(tracker, Mode, path);
+    } else {
+        fprintf(stderr, "Unknown tracker type: %s. Use 'lighttrack' or 'ostrack'.\n", tracker_type.c_str());
+        return -1;
+    }
 
     return 0;
 }

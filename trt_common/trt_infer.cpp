@@ -40,7 +40,7 @@ namespace TRT {
 
     template<class T>
     shared_ptr<T> make_nvshared(T* ptr) {
-        return shared_ptr<T>(ptr, [](T* p){p->destroy();});
+        return shared_ptr<T>(ptr, [](T* p){delete p;});
     }
 
     std::vector<uint8_t> load_file(const string& file) {
@@ -85,7 +85,7 @@ namespace TRT {
             runtime_ = make_nvshared(createInferRuntime(gLogger));
             if(runtime_ == nullptr) return false;
 
-            engine_ = make_nvshared(runtime_->deserializeCudaEngine(pdata, size, nullptr));
+            engine_ = make_nvshared(runtime_->deserializeCudaEngine(pdata, size));
             if(engine_ == nullptr) return false;
 
             exec_context_ = make_nvshared(engine_->createExecutionContext());
@@ -195,7 +195,7 @@ namespace TRT {
     }
 
     void InferImpl::build_engine_input_and_output_mapper() {
-        int nbBindings = context_->engine_->getNbBindings();
+        int nbBindings = context_->engine_->getNbIOTensors();
 
         inputs_.clear();
         inputs_names_.clear();
@@ -206,47 +206,32 @@ namespace TRT {
         blobs_name_mapper_.clear();
 
         for(int i = 0; i < nbBindings; ++i){
-            auto dims = context_->engine_->getBindingDimensions(i);
-            const char* bindingName = context_->engine_->getBindingName(i);
+            const char* bindingName = context_->engine_->getIOTensorName(i);
+            auto dims = context_->engine_->getTensorShape(bindingName);
+            bool isInput = (context_->engine_->getTensorIOMode(bindingName) == nvinfer1::TensorIOMode::kINPUT);
+            
             if(dims.nbDims == 4){
                 dims.d[0] = 1;
-                auto newTensor = make_shared<Tensor>(dims.nbDims, dims.d);
-                newTensor->set_stream(context_->stream_);
-                newTensor->set_workspace(workspace_);
-                if(context_->engine_->bindingIsInput(i)){
-                    // is input
-                    inputs_.push_back(newTensor);
-                    inputs_names_.emplace_back(bindingName);
-                    inputs_map_to_ordered_index_.push_back(ordered_Blobs_.size());
-                }
-                else{
-                    // is output
-                    outputs_.push_back(newTensor);
-                    outputs_names_.emplace_back(bindingName);
-                    outputs_map_to_ordered_index_.push_back(ordered_Blobs_.size());
-                }
-                blobs_name_mapper_[bindingName] = i;
-                ordered_Blobs_.push_back(newTensor);
+            }
+            
+            std::vector<int> int_dims(dims.d, dims.d + dims.nbDims);
+            auto newTensor = make_shared<Tensor>(int_dims);
+            newTensor->set_stream(context_->stream_);
+            newTensor->set_workspace(workspace_);
+            if(isInput){
+                // is input
+                inputs_.push_back(newTensor);
+                inputs_names_.emplace_back(bindingName);
+                inputs_map_to_ordered_index_.push_back(ordered_Blobs_.size());
             }
             else{
-                auto newTensor = make_shared<Tensor>(dims.nbDims, dims.d);
-                newTensor->set_stream(context_->stream_);
-                newTensor->set_workspace(workspace_);
-                if(context_->engine_->bindingIsInput(i)){
-                    // is input
-                    inputs_.push_back(newTensor);
-                    inputs_names_.emplace_back(bindingName);
-                    inputs_map_to_ordered_index_.push_back(ordered_Blobs_.size());
-                }
-                else{
-                    // is output
-                    outputs_.push_back(newTensor);
-                    outputs_names_.emplace_back(bindingName);
-                    outputs_map_to_ordered_index_.push_back(ordered_Blobs_.size());
-                }
-                blobs_name_mapper_[bindingName] = i;
-                ordered_Blobs_.push_back(newTensor);
+                // is output
+                outputs_.push_back(newTensor);
+                outputs_names_.emplace_back(bindingName);
+                outputs_map_to_ordered_index_.push_back(ordered_Blobs_.size());
             }
+            blobs_name_mapper_[bindingName] = i;
+            ordered_Blobs_.push_back(newTensor);
         }
 
         bindings_ptr_.resize(ordered_Blobs_.size());
@@ -254,12 +239,15 @@ namespace TRT {
 
     void InferImpl::forward(bool sync) {
         int inputBatchSize = inputs_[0]->shape(0);
+        int nbBindings = context_->engine_->getNbIOTensors();
 
-        for(int i = 0; i < context_->engine_->getNbBindings(); ++i){
-            auto dims = context_->engine_->getBindingDimensions(i);
+        for(int i = 0; i < nbBindings; ++i){
+            const char* bindingName = context_->engine_->getIOTensorName(i);
+            auto dims = context_->engine_->getTensorShape(bindingName);
             if(dims.nbDims == 4) dims.d[0] = inputBatchSize;
-            if(context_->engine_->bindingIsInput(i))
-                context_->exec_context_->setBindingDimensions(i, dims);
+            bool isInput = (context_->engine_->getTensorIOMode(bindingName) == nvinfer1::TensorIOMode::kINPUT);
+            if(isInput)
+                context_->exec_context_->setInputShape(bindingName, dims);
         }
 
         for(auto & output : outputs_){
@@ -267,11 +255,12 @@ namespace TRT {
             output->to_gpu(false);
         }
 
-        for(int i = 0; i < ordered_Blobs_.size(); ++i)
-            bindings_ptr_[i] = ordered_Blobs_[i]->gpu();
+        for(int i = 0; i < nbBindings; ++i){
+            const char* bindingName = context_->engine_->getIOTensorName(i);
+            context_->exec_context_->setTensorAddress(bindingName, ordered_Blobs_[i]->gpu());
+        }
 
-        void** bindingsptr = bindings_ptr_.data();
-        bool exe_res = context_->exec_context_->enqueueV2(bindingsptr, context_->stream_, nullptr);
+        bool exe_res = context_->exec_context_->enqueueV3(context_->stream_);
         if(!exe_res){
             auto code = cudaGetLastError();
             INFOF("Enqueue failed, code %d[%s], message %s", code, cudaGetErrorName(code), cudaGetErrorString(code));
@@ -380,7 +369,7 @@ namespace TRT {
 
     int InferImpl::get_max_batch_size() {
         assert(context_ != nullptr);
-        return context_->engine_->getMaxBatchSize();
+        return inputs_.empty() ? 1 : inputs_[0]->shape(0);
     }
 
     void InferImpl::synchronize() {

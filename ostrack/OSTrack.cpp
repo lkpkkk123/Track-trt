@@ -45,7 +45,7 @@ namespace OSTrack {
 
         void init(cv::Mat &z_img, cv::Rect &init_bbox) override{
             target_bbox_ = init_bbox;
-            zin_ = infer_model_->input(0);
+            zin_ = infer_model_->tensor("z");
             int z_in_h = zin_->shape(2);
             if(z_in_h == 192){
                 search_factor_ = 5.0f;
@@ -70,15 +70,15 @@ namespace OSTrack {
             cropSubImg(x_img, x_patch, search_factor_, search_size_, resize_factor);
 
             // 绑定输入
-            xin_ = infer_model_->input(1);
+            xin_ = infer_model_->tensor("x");
             float m[] = {0.406, 0.456, 0.485};
             float std[]  = {0.225, 0.224, 0.229};
             xin_->set_norm_mat_invert(0, x_patch, m, std);
 
             // 绑定输出
-            score_map_ = infer_model_->output(1);
-            size_map_ = infer_model_->output(2);
-            offset_map_ = infer_model_->output(0);
+            score_map_ = infer_model_->tensor("score_map");
+            size_map_ = infer_model_->tensor("size_map");
+            offset_map_ = infer_model_->tensor("offset_map");
 
             // 推理
             infer_model_->forward();

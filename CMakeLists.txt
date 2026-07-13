@@ -7,7 +7,7 @@ set(EXECUTABLE_OUTPUT_PATH ${PROJECT_SOURCE_DIR}/workspace)
 set(LIBRARY_OUTPUT_PATH ${PROJECT_SOURCE_DIR}/workspace)
 set(CMAKE_SKIP_BUILD_RPATH False)
 set(CMAKE_SKIP_RPATH False)
-set(CMAKE_BUILD_RPATH "/home/lsf/Third_party/TensorRT-8.6.1.6/lib")
+set(CMAKE_BUILD_RPATH "/usr/lib/aarch64-linux-gnu")
 
 file(GLOB_RECURSE CPPS
         ${PROJECT_SOURCE_DIR}/lighttrack/*.cpp
@@ -20,19 +20,20 @@ file(GLOB_RECURSE CPPS
 
 # set(OpenCV_DIR   "/home/lsf/Third_party/OPENCV_4_5_5/opencv/build")
 set(CUDA_DIR      "/usr/local/cuda")
-set(TENSORRT_DIR  "/home/lsf/Third_party/TensorRT-8.6.1.6")
+set(TENSORRT_DIR  "/usr")
 find_package(OpenCV REQUIRED)
 find_package(CUDA REQUIRED)
 include_directories(
         ${PROJECT_SOURCE_DIR}
         ${OpenCV_INCLUDE_DIRS}
         ${CUDA_DIR}/include
+        ${TENSORRT_DIR}/include/aarch64-linux-gnu
         ${TENSORRT_DIR}/include
         "/usr/include/eigen3"
 )
 link_directories(
         ${CUDA_DIR}/lib64
-        ${TENSORRT_DIR}/lib
+        ${TENSORRT_DIR}/lib/aarch64-linux-gnu
 )
 list(APPEND ALL_LIBS
         cuda cublas cudart cudnn
@@ -47,7 +48,7 @@ add_library(${PROJECT_NAME} SHARED ${CPPS})
 target_link_libraries(${PROJECT_NAME} ${ALL_LIBS})
 
 # reference：https://developer.nvidia.com/cuda-gpus#compute
-set_property(TARGET ${PROJECT_NAME} PROPERTY CUDA_ARCHITECTURES 89)
+set_property(TARGET ${PROJECT_NAME} PROPERTY CUDA_ARCHITECTURES 87)
 target_compile_options(${PROJECT_NAME} PUBLIC
         $<$<COMPILE_LANGUAGE:CUDA>:--default-stream per-thread -lineinfo --use_fast_math --disable-warnings>)
 
