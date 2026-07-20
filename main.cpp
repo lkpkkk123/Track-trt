@@ -2,8 +2,8 @@
 #include <iostream>
 #include <fstream>
 #include <boost/format.hpp>
-#include "lighttrack/LightTrack.hpp"
-#include "ostrack/OSTrack.hpp"
+#include <opencv2/opencv.hpp>
+#include "trackerAPI.h"
 
 using namespace std;
 
@@ -33,8 +33,7 @@ inline static cv::Rect read_gt(std::string &gt_file) {
 }
 
 
-template<class T>
-void LaunchTrack(shared_ptr<T> tracker, int Mode, const string& path){
+void LaunchTrack(ITrackIF* tracker, int Mode, const string& path){
 
     cv::VideoCapture cap;
     string display_name = "Track";
@@ -59,7 +58,7 @@ void LaunchTrack(shared_ptr<T> tracker, int Mode, const string& path){
 
             if (is_tracking) {
                 auto start = std::chrono::steady_clock::now();
-                bbox = tracker->track(img);
+                tracker->track(img, bbox);
                 auto end = std::chrono::steady_clock::now();
                 std::chrono::duration<double> elapsed = end - start;
                 double time = 1000 * elapsed.count();
@@ -120,7 +119,7 @@ void LaunchTrack(shared_ptr<T> tracker, int Mode, const string& path){
         for (int i = 1; i < 597; ++i) {
             img = cv::imread((fmt % i).str(),1);
             auto start = std::chrono::steady_clock::now();
-            bbox = tracker->track(img);
+            tracker->track(img, bbox);
             auto end = std::chrono::steady_clock::now();
             std::chrono::duration<double> elapsed = end - start;
             double time = 1000 * elapsed.count();
@@ -162,29 +161,27 @@ int main(int argc, char* argv[]){
         for (auto &c : tracker_type) c = tolower(c);
     }
 
+    ITrackIF* tracker = nullptr;
+
     if (tracker_type == "lighttrack" || tracker_type == "light") {
-        string z_path = "lighttrack-z.trt";
-        string x_path = "lighttrack-x-head.trt";
-        auto tracker = LightTrack::create_tracker(z_path, x_path);
-        if (tracker == nullptr) {
-            printf("LightTrack tracker creation failed.\n");
-            return -1;
-        }
-        printf("Using LightTrack algorithm...\n");
-        LaunchTrack(tracker, Mode, path);
+        tracker = create_lighttrack_instance();
+        if (tracker) tracker->load_model("lighttrack-z.trt,lighttrack-x-head.trt");
     } else if (tracker_type == "ostrack" || tracker_type == "os") {
-        string engine_path = "ostrack-256.trt";
-        auto tracker = OSTrack::create_tracker(engine_path);
-        if (tracker == nullptr) {
-            printf("OSTrack tracker creation failed.\n");
-            return -1;
-        }
-        printf("Using OSTrack algorithm...\n");
-        LaunchTrack(tracker, Mode, path);
+        tracker = create_ostrack_instance();
+        if (tracker) tracker->load_model("ostrack-256.trt");
     } else {
         fprintf(stderr, "Unknown tracker type: %s. Use 'lighttrack' or 'ostrack'.\n", tracker_type.c_str());
         return -1;
     }
 
+    if (tracker == nullptr) {
+        printf("Tracker creation failed.\n");
+        return -1;
+    }
+
+    printf("Using %s algorithm via ITrackIF interface...\n", tracker_type.c_str());
+    LaunchTrack(tracker, Mode, path);
+
+    destroy_tracker_instance(tracker);
     return 0;
 }

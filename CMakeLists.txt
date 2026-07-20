@@ -16,6 +16,7 @@ file(GLOB_RECURSE CPPS
         ${PROJECT_SOURCE_DIR}/ostrack/*.cu
         ${PROJECT_SOURCE_DIR}/trt_common/*.cpp
         ${PROJECT_SOURCE_DIR}/trt_common/*.cu
+        ${PROJECT_SOURCE_DIR}/trackerAPI.cpp
 )
 
 # set(OpenCV_DIR   "/home/lsf/Third_party/OPENCV_4_5_5/opencv/build")
