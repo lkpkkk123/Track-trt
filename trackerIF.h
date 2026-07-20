@@ -9,5 +9,6 @@ struct ITrackIF
     virtual bool load_model(const char *param) = 0;
     virtual bool init(cv::Mat &image, cv::Rect &bbox) = 0;
     virtual float track(cv::Mat &image, cv::Rect &bbox) = 0;
+    virtual const char* get_track_name() = 0;
     virtual ~ITrackIF() = 0;
 };
