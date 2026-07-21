@@ -57,6 +57,10 @@ public:
         bbox = tracker_->track(image);
         return 1.0f; // Return 1.0f score as requested
     }
+
+    const char* get_track_name() override {
+        return "LightTrack";
+    }
 };
 
 class OSTrackWrapper : public ITrackIF {
@@ -94,6 +98,10 @@ public:
         if (!tracker_) return 0.0f;
         bbox = tracker_->track(image);
         return 1.0f; // Return 1.0f score as requested
+    }
+
+    const char* get_track_name() override {
+        return "OSTrack";
     }
 };
 

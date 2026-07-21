@@ -70,7 +70,11 @@ namespace LightTrack {
             float hc_z = target_bbox_.height + 0.5 * (target_bbox_.width + target_bbox_.height);
             float s_z = std::round(std::sqrt(wc_z * hc_z));  // (s_z)^2=(w+2p)x(h+2p), 模板图像上 不缩放时的 框加上pad 的大小
             cv::Mat z_patch(template_size_, template_size_, CV_8UC3);
-            cropSubImg(z_img, z_patch, template_size_, s_z);
+            if (z_img.type() == CV_8UC2) {
+                cropSubImgNv12(z_img, z_patch, template_size_, s_z);
+            } else {
+                cropSubImg(z_img, z_patch, template_size_, s_z);
+            }
             // 处理输入
             zin_img_ = z_model_->input(0);
             float m[] = {0.406, 0.456, 0.485};
@@ -96,7 +100,11 @@ namespace LightTrack {
             float pad = d_search / scale_z;
             float s_x = s_z + 2 * pad;
             cv::Mat x_patch(search_size_, search_size_, CV_8UC3);
-            cropSubImg(x_img, x_patch, search_size_, s_x);
+            if (x_img.type() == CV_8UC2) {
+                cropSubImgNv12(x_img, x_patch, search_size_, s_x);
+            } else {
+                cropSubImg(x_img, x_patch, search_size_, s_x);
+            }
             float m[] = {0.406, 0.456, 0.485};
             float std[]  = {0.225, 0.224, 0.229};
             xin_img_->set_norm_mat_invert(0, x_patch, m, std);
@@ -223,6 +231,111 @@ namespace LightTrack {
                 cv::resize(img_patch_roi, dst, cv::Size(model_sz, model_sz));
             else
                 dst = img_patch_roi;
+        }
+
+        void cropSubImgNv12(cv::Mat &img, cv::Mat &dst, int model_sz, float original_sz) const {
+            // img has type CV_8UC2, size H x W, containing NV12 data starting at img.data.
+            // Y component has size H x W, single-channel CV_8UC1.
+            // UV component has size (H/2) x (W/2), 2-channel CV_8UC2.
+            int H = img.rows;
+            int W = img.cols;
+
+            // Extract Y and UV planes from img.data
+            // Stride of Y is W bytes.
+            // Stride of UV is W bytes (W/2 pixels * 2 channels).
+            cv::Mat Y_img(H, W, CV_8UC1, img.data, W);
+            cv::Mat UV_img(H / 2, W / 2, CV_8UC2, img.data + H * W, W);
+
+            float c = (original_sz + 1) / 2.f;
+            // 计算出剪裁边框的左上角
+            int context_xmin = std::round(target_bbox_.x + target_bbox_.width / 2.f - c);
+            int context_ymin = std::round(target_bbox_.y + target_bbox_.height / 2.f - c);
+
+            // Align context_xmin and context_ymin to even numbers (essential for NV12 UV sub-sampling)
+            context_xmin = (context_xmin >> 1) << 1;
+            context_ymin = (context_ymin >> 1) << 1;
+
+            // Compute crop size, aligned to even numbers
+            int crop_size = (static_cast<int>(std::round(original_sz)) >> 1) << 1;
+            if (crop_size < 2) crop_size = 2; // Safeguard
+
+            int context_xmax = context_xmin + crop_size - 1;
+            int context_ymax = context_ymin + crop_size - 1;
+
+            // 边界部分要填充的像素
+            int left_pad = std::max(0, -context_xmin);
+            int top_pad = std::max(0, -context_ymin);
+            int right_pad = std::max(0, context_xmax - W + 1);
+            int bottom_pad = std::max(0, context_ymax - H + 1);
+
+            // Align all padding amounts to even numbers
+            left_pad = (left_pad >> 1) << 1;
+            top_pad = (top_pad >> 1) << 1;
+            right_pad = ((right_pad + 1) >> 1) << 1;
+            bottom_pad = ((bottom_pad + 1) >> 1) << 1;
+
+            // crop ROI
+            cv::Rect crop_y;
+            crop_y.x = context_xmin + left_pad;
+            crop_y.y = context_ymin + top_pad;
+            crop_y.width = crop_size;
+            crop_y.height = crop_size;
+
+            // Crop Y
+            cv::Mat img_patch_roi_y;
+            if (left_pad > 0 || top_pad > 0 || right_pad > 0 || bottom_pad > 0) {
+                cv::Mat pad_Y;
+                cv::copyMakeBorder(Y_img, pad_Y, top_pad, bottom_pad,
+                                   left_pad, right_pad, cv::BORDER_CONSTANT, cv::Scalar(0));
+                img_patch_roi_y = pad_Y(crop_y);
+            } else {
+                img_patch_roi_y = Y_img(crop_y);
+            }
+
+            // Crop UV
+            cv::Rect crop_uv(crop_y.x / 2, crop_y.y / 2, crop_y.width / 2, crop_y.height / 2);
+            int left_pad_uv = left_pad / 2;
+            int top_pad_uv = top_pad / 2;
+            int right_pad_uv = right_pad / 2;
+            int bottom_pad_uv = bottom_pad / 2;
+
+            cv::Mat img_patch_roi_uv;
+            if (left_pad_uv > 0 || top_pad_uv > 0 || right_pad_uv > 0 || bottom_pad_uv > 0) {
+                cv::Mat pad_UV;
+                cv::copyMakeBorder(UV_img, pad_UV, top_pad_uv, bottom_pad_uv,
+                                   left_pad_uv, right_pad_uv, cv::BORDER_CONSTANT, cv::Scalar(128, 128));
+                img_patch_roi_uv = pad_UV(crop_uv);
+            } else {
+                img_patch_roi_uv = UV_img(crop_uv);
+            }
+
+            // Prepare a temporary NV12 matrix for the resized model input
+            // model_sz must be even
+            int model_sz_even = (model_sz >> 1) << 1;
+            cv::Mat yuv_nv12(model_sz_even * 3 / 2, model_sz_even, CV_8UC1);
+            cv::Mat y_dst = yuv_nv12(cv::Rect(0, 0, model_sz_even, model_sz_even));
+            cv::Mat uv_dst(model_sz_even / 2, model_sz_even / 2, CV_8UC2, yuv_nv12.ptr<uchar>(model_sz_even), model_sz_even);
+
+            // Resize Y
+            if (img_patch_roi_y.rows != model_sz_even || img_patch_roi_y.cols != model_sz_even) {
+                cv::Mat y_resized;
+                cv::resize(img_patch_roi_y, y_resized, cv::Size(model_sz_even, model_sz_even));
+                y_resized.copyTo(y_dst);
+            } else {
+                img_patch_roi_y.copyTo(y_dst);
+            }
+
+            // Resize UV
+            if (img_patch_roi_uv.rows != model_sz_even / 2 || img_patch_roi_uv.cols != model_sz_even / 2) {
+                cv::resize(img_patch_roi_uv, uv_dst, cv::Size(model_sz_even / 2, model_sz_even / 2));
+            } else {
+                img_patch_roi_uv.copyTo(uv_dst);
+            }
+
+            // Convert NV12 to BGR (or RGB if needed).
+            // OpenCV COLOR_YUV2BGR_NV12 produces a standard BGR image of size model_sz x model_sz.
+            // This is required since set_norm_mat_invert treats BGR channels appropriately for RGB conversion.
+            cv::cvtColor(yuv_nv12, dst, cv::COLOR_YUV2BGR_NV12);
         }
 
         int template_size_ = 128;

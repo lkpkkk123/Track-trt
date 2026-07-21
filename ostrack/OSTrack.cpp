@@ -57,7 +57,11 @@ namespace OSTrack {
 
             cv::Mat z_patch;
             float resize_factor = 1.f;
-            cropSubImg(z_img, z_patch, template_factor_, template_size_, resize_factor);
+            if (z_img.type() == CV_8UC2) {
+                cropSubImgNv12(z_img, z_patch, template_factor_, template_size_, resize_factor);
+            } else {
+                cropSubImg(z_img, z_patch, template_factor_, template_size_, resize_factor);
+            }
 
             float m[] = {0.406, 0.456, 0.485};
             float std[]  = {0.225, 0.224, 0.229};
@@ -67,7 +71,11 @@ namespace OSTrack {
         cv::Rect track(cv::Mat& x_img) override{
             cv::Mat x_patch;
             float resize_factor = 1.f;
-            cropSubImg(x_img, x_patch, search_factor_, search_size_, resize_factor);
+            if (x_img.type() == CV_8UC2) {
+                cropSubImgNv12(x_img, x_patch, search_factor_, search_size_, resize_factor);
+            } else {
+                cropSubImg(x_img, x_patch, search_factor_, search_size_, resize_factor);
+            }
 
             // 绑定输入
             xin_ = infer_model_->tensor("x");
@@ -169,6 +177,89 @@ namespace OSTrack {
             cv::resize(img_patch_roi, dst, cv::Size(model_sz, model_sz));
 
             resize_factor = float(model_sz) / float(crop_sz);
+        }
+
+        void cropSubImgNv12(const cv::Mat& img, cv::Mat& dst, float area_factor, int model_sz, float& resize_factor) const {
+            // img has type CV_8UC2, size H x W, containing NV12 data starting at img.data.
+            // Y component has size H x W, single-channel CV_8UC1.
+            // UV component has size (H/2) x (W/2), 2-channel CV_8UC2.
+            int H = img.rows;
+            int W = img.cols;
+
+            // Extract Y and UV planes from img.data
+            // Stride of Y is W bytes. Stride of UV is W bytes (W/2 pixels * 2 channels).
+            cv::Mat Y_img(H, W, CV_8UC1, img.data, W);
+            cv::Mat UV_img(H / 2, W / 2, CV_8UC2, img.data + H * W, W);
+
+            float cx = target_bbox_.x + 0.5f * target_bbox_.width;
+            float cy = target_bbox_.y + 0.5f * target_bbox_.height;
+            int crop_sz = std::ceil(std::sqrt(target_bbox_.width * target_bbox_.height) * area_factor);
+
+            // Align crop_sz to even numbers (essential for NV12 UV sub-sampling)
+            crop_sz = (crop_sz >> 1) << 1;
+            if (crop_sz < 2) crop_sz = 2;
+
+            // 计算出剪裁边框的左上角，并对齐到偶数
+            int crop_x1 = (static_cast<int>(std::round(cx - crop_sz * 0.5f)) >> 1) << 1;
+            int crop_y1 = (static_cast<int>(std::round(cy - crop_sz * 0.5f)) >> 1) << 1;
+            int crop_x2 = crop_x1 + crop_sz;
+            int crop_y2 = crop_y1 + crop_sz;
+
+            // 边界部分要填充的像素，对齐到偶数
+            int left_pad   = (std::max(0, -crop_x1) >> 1) << 1;
+            int top_pad    = (std::max(0, -crop_y1) >> 1) << 1;
+            int right_pad  = ((std::max(0, crop_x2 - W + 1) + 1) >> 1) << 1;
+            int bottom_pad = ((std::max(0, crop_y2 - H + 1) + 1) >> 1) << 1;
+
+            // crop ROI (Y平面坐标)
+            cv::Rect crop_roi_y(crop_x1 + left_pad, crop_y1 + top_pad, crop_x2 - crop_x1, crop_y2 - crop_y1);
+
+            // Crop Y
+            cv::Mat img_patch_roi_y;
+            if (left_pad > 0 || top_pad > 0 || right_pad > 0 || bottom_pad > 0) {
+                cv::Mat pad_Y;
+                cv::copyMakeBorder(Y_img, pad_Y, top_pad, bottom_pad,
+                                   left_pad, right_pad, cv::BORDER_CONSTANT, cv::Scalar(114));
+                img_patch_roi_y = pad_Y(crop_roi_y);
+            } else {
+                img_patch_roi_y = Y_img(crop_roi_y);
+            }
+
+            // Crop UV (UV平面坐标是Y的一半)
+            cv::Rect crop_roi_uv(crop_roi_y.x / 2, crop_roi_y.y / 2, crop_roi_y.width / 2, crop_roi_y.height / 2);
+            int left_pad_uv   = left_pad / 2;
+            int top_pad_uv    = top_pad / 2;
+            int right_pad_uv  = right_pad / 2;
+            int bottom_pad_uv = bottom_pad / 2;
+
+            cv::Mat img_patch_roi_uv;
+            if (left_pad_uv > 0 || top_pad_uv > 0 || right_pad_uv > 0 || bottom_pad_uv > 0) {
+                cv::Mat pad_UV;
+                cv::copyMakeBorder(UV_img, pad_UV, top_pad_uv, bottom_pad_uv,
+                                   left_pad_uv, right_pad_uv, cv::BORDER_CONSTANT, cv::Scalar(128, 128));
+                img_patch_roi_uv = pad_UV(crop_roi_uv);
+            } else {
+                img_patch_roi_uv = UV_img(crop_roi_uv);
+            }
+
+            // Prepare temporary NV12 buffer for the resized model input (model_sz must be even)
+            int model_sz_even = (model_sz >> 1) << 1;
+            cv::Mat yuv_nv12(model_sz_even * 3 / 2, model_sz_even, CV_8UC1);
+            cv::Mat y_dst = yuv_nv12(cv::Rect(0, 0, model_sz_even, model_sz_even));
+            cv::Mat uv_dst(model_sz_even / 2, model_sz_even / 2, CV_8UC2, yuv_nv12.ptr<uchar>(model_sz_even), model_sz_even);
+
+            // Resize Y (resize to temp first to avoid writing into ROI directly)
+            cv::Mat y_resized;
+            cv::resize(img_patch_roi_y, y_resized, cv::Size(model_sz_even, model_sz_even));
+            y_resized.copyTo(y_dst);
+
+            // Resize UV (uv_dst points directly into yuv_nv12 memory, safe to use as dst)
+            cv::resize(img_patch_roi_uv, uv_dst, cv::Size(model_sz_even / 2, model_sz_even / 2));
+
+            // Convert NV12 to BGR
+            cv::cvtColor(yuv_nv12, dst, cv::COLOR_YUV2BGR_NV12);
+
+            resize_factor = float(model_sz_even) / float(crop_sz);
         }
 
         float template_factor_ = 2.0f;
